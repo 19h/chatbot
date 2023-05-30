@@ -1,0 +1,10 @@
+node_modules/
+.idea/
+.env
+
+# OS generated files #
+.DS_Store
+
+# Logs #
+logs
+*.log
