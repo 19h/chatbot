@@ -10,9 +10,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@hpcc-js/wasm": "^2.8.0",
+    "@hpcc-js/wasm": "^2.13.0",
     "@microsoft/fetch-event-source": "^2.0.1",
-    "chatgpt": "^4.1.1",
     "gpt-3-encoder": "^1.1.4",
     "keyv": "^4.5.2",
     "keyv-file": "^0.2.0",

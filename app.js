@@ -1,86 +1,7 @@
 const fs = require('fs');
-
-const Keyv = require('keyv');
-const { KeyvFile } = require('keyv-file');
-
-const gpt3tokenizer = require('gpt-3-encoder');
+const path = require('path');
 
 const sharp = require('sharp');
-
-async function copilotStreamed(url, opts) {
-    const response = await fetch(url, opts);
-
-    if (!response.ok) {
-        return null;
-    }
-
-    const reader = response.body.getReader();
-    let decoder = new TextDecoder();
-
-    const processResult = result => {
-        return decoder.decode(result.value, { stream: true });
-    };
-
-    return new Promise(async (resolve, reject) => {
-        const chunks = [];
-
-        while (true) {
-            const result = await reader.read();
-
-            if (result.done) {
-                break;
-            }
-
-            chunks.push(processResult(result));
-        }
-
-        const resp = {
-            role: 'assistant',
-            content: '',
-        };
-
-        try {
-            const lines = chunks.join('').split('\n\n');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.slice(6));
-
-                        if (data.choices[0]['finish_reason'] !== null) {
-                            break;
-                        }
-
-                        if ('role' in data.choices[0].delta) {
-                            resp.role = data.choices[0].delta.role;
-                            resp.content = '';
-                        }
-
-                        if ('content' in data.choices[0].delta) {
-                            resp.content += data.choices[0].delta.content;
-                        }
-                    } catch {
-                        continue;
-                    }
-                }
-            }
-
-            resolve(resp);
-        } catch (e) {
-            reject(e);
-        }
-    });
-}
-
-const keyv = new Keyv({
-    store: new KeyvFile({
-        filename: './keyv/db.json',
-        expiredCheckDelay: 24 * 3600 * 1000,
-        writeDelay: 10,
-        encode: data => JSON.stringify(data, null, 4),
-        decode: JSON.parse,
-    }),
-});
 
 (async () => {
     const TelegramBot = require('node-telegram-bot-api');
@@ -162,6 +83,71 @@ const keyv = new Keyv({
             throw new Error('Failed to update cat token after 5 retries');
         }
 
+        async copilotStreamed(url, opts) {
+            const response = await fetch(url, opts);
+
+            if (!response.ok) {
+                return null;
+            }
+
+            const reader = response.body.getReader();
+            let decoder = new TextDecoder();
+
+            const processResult = result => {
+                return decoder.decode(result.value, { stream: true });
+            };
+
+            return new Promise(async (resolve, reject) => {
+                const chunks = [];
+
+                while (true) {
+                    const result = await reader.read();
+
+                    if (result.done) {
+                        break;
+                    }
+
+                    chunks.push(processResult(result));
+                }
+
+                const resp = {
+                    role: 'assistant',
+                    content: '',
+                };
+
+                try {
+                    const lines = chunks.join('').split('\n\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+
+                                if (data.choices[0]['finish_reason'] !== null) {
+                                    break;
+                                }
+
+                                if ('role' in data.choices[0].delta) {
+                                    resp.role = data.choices[0].delta.role;
+                                    resp.content = '';
+                                }
+
+                                if ('content' in data.choices[0].delta) {
+                                    resp.content += data.choices[0].delta.content;
+                                }
+                            } catch {
+                                continue;
+                            }
+                        }
+                    }
+
+                    resolve(resp);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        }
+
         async completion(
             messages,
             temperature = 0.1,
@@ -182,11 +168,11 @@ const keyv = new Keyv({
             const timeout = setTimeout(() => {
                 signal.abort();
 
-                reject(new Error('Timeout'));
+                out_reject(new Error('Timeout'));
             }, 40000);
 
             try {
-                const copstr = copilotStreamed(
+                const copstr = this.copilotStreamed(
                     "https://copilot-proxy.githubusercontent.com/v1/chat/completions",
                     {
                         "method": "POST",
@@ -237,10 +223,10 @@ const keyv = new Keyv({
         constructor() {
             this.apiKey = process.CLAUDE_API_TOKEN;
         }
-    
+
         formatMessages(messages) {
             let formattedMessages = '';
-    
+
             for (const message of messages) {
                 if (message.role === 'system' || message.role === 'user') {
                     formattedMessages += `\n\nHuman: ${message.content}`;
@@ -248,7 +234,7 @@ const keyv = new Keyv({
                     formattedMessages += `\n\nAssistant: ${message.content}`;
                 }
             }
-    
+
             return formattedMessages;
         }
 
@@ -269,26 +255,26 @@ const keyv = new Keyv({
                 max_tokens,
             );
         }
-    
+
         async completion_raw(
             prompt,
             temperature = 0.1,
             max_tokens = 10000,
         ) {
             const signal = new AbortController();
-    
+
             let out_reject, out_resolve;
-    
+
             const output = new Promise((resolve, reject) => {
                 out_reject = reject;
                 out_resolve = resolve;
             });
-    
+
             const timeout = setTimeout(() => {
                 signal.abort();
-                reject(new Error('Timeout'));
+                out_reject(new Error('Timeout'));
             }, 40000);
-    
+
             try {
                 const res = await fetch("https://api.anthropic.com/v1/complete", {
                     "method": "POST",
@@ -307,25 +293,25 @@ const keyv = new Keyv({
                 });
 
                 const json = await res.json();
-    
+
                 clearTimeout(timeout);
-    
+
                 if (json === null) {
                     out_reject(new Error('Failed to get response from Claude API'));
                     return;
                 }
-    
+
                 out_resolve(json.completion);
             } catch (err) {
                 clearTimeout(timeout);
                 out_reject(err);
             }
-    
+
             return output;
         }
     }
 
-    class ChatGPTSession {
+    class UserConversation {
         constructor() {
             this.api = new ChatGPTAPI();
             this.claudeApi = new ClaudeAPI();
@@ -363,7 +349,7 @@ const keyv = new Keyv({
             return this.api;
         }
 
-        init_session(name) {
+        init_conversation(name) {
             const persona = profiles.get(name);
 
             if (!persona) {
@@ -387,7 +373,7 @@ const keyv = new Keyv({
             }];
         }
 
-        init_session_custom(custom_profile) {
+        init_conversation_custom(custom_profile) {
             const name = custom_profile.name;
             const name_other = custom_profile.name_other;
             const persona = custom_profile.persona;
@@ -437,106 +423,130 @@ const keyv = new Keyv({
         }
     }
 
-    const chatgpt_sessions = {};
+    class ChatSession {
+        constructor(chat_id, user_id) {
+            this.chat_id = chat_id;
+            this.user_id = user_id;
 
-    const reset_session = (chat_id, user_id) => {
-        let checkpoint = null;
+            this.ensure_session_dir();
 
-        if (chatgpt_sessions[chat_id]?.[user_id]?.session) {
-            const session = chatgpt_sessions[chat_id][user_id].session;
-            
-            checkpoint = session.dump_for_checkpoint();
+            this.ctx = this.load_session() || this.reset_session();
         }
 
-        chatgpt_sessions[chat_id] = chatgpt_sessions[chat_id] || {};
-        chatgpt_sessions[chat_id][user_id] = {
-            session: new ChatGPTSession(),
-            is_working: false,
-            profile: null,
-            last_message: null,
-            custom_profile: null,
-        };
+        ensure_session_dir() {
+            const sessions_dir = path.join(__dirname, 'sessions', this.user_id);
 
-        if (checkpoint?.backend) {
-            chatgpt_sessions[chat_id][user_id].session.with_backend(checkpoint.backend);
+            if (fs.existsSync(sessions_dir)) {
+                return;
+            }
+
+            fs.mkdirSync(sessions_dir, { recursive: true });
         }
-    };
 
-    const dump_session = (chat_id, user_id) => {
-        const session = chatgpt_sessions[chat_id][user_id].session;
-        const checkpoint = session.dump_for_checkpoint();
+        reset_session() {
+            let checkpoint = null;
 
-        chatgpt_sessions[chat_id][user_id].checkpoint = checkpoint;
+            if (this.ctx?.conversation) {
+                const conversation = this.ctx.conversation;
 
-        return {
-            is_working: false,
-            profile: chatgpt_sessions[chat_id][user_id].profile,
-            last_message: chatgpt_sessions[chat_id][user_id].last_message,
-            custom_profile: chatgpt_sessions[chat_id][user_id].custom_profile,
-            checkpoint,
-        };
-    };
+                checkpoint = conversation.dump_for_checkpoint();
+            }
 
-    const persist_sessions = () => {
-        /*
-            Store metadata in a file.
-            For the session, call session.dump_for_checkpoint().
-            collect is_working, profile, last_message.
-        */
-        const data = {};
+            this.ctx = {
+                conversation: new UserConversation(),
+                is_working: false,
+                profile: null,
+                last_message: null,
+                custom_profile: null,
+            };
 
-        for (const chat_id in chatgpt_sessions) {
-            data[chat_id] = {};
+            if (checkpoint?.backend) {
+                this.ctx.conversation.with_backend(checkpoint.backend);
+            }
 
-            for (const user_id in chatgpt_sessions[chat_id]) {
-                data[chat_id][user_id] = dump_session(chat_id, user_id);
+            this.persist();
+
+            return this.ctx;
+        }
+
+        load_session() {
+            const session_path = path.join(__dirname, 'sessions', this.user_id, `${this.chat_id}.json`);
+
+            if (!fs.existsSync(session_path)) {
+                return null;
+            }
+
+            try {
+                const data = JSON.parse(fs.readFileSync(session_path).toString());
+                const conversation = new UserConversation();
+
+                conversation.init_from_checkpoint(data.checkpoint);
+
+                return {
+                    conversation,
+                    is_working: data.is_working,
+                    profile: data.profile,
+                    last_message: data.last_message,
+                    custom_profile: data.custom_profile,
+                };
+            } catch (err) {
+                console.log(err);
+                return null;
             }
         }
 
-        fs.writeFileSync('sessions.json', JSON.stringify(data, null, 4));
-    };
+        persist() {
+            const session_path =
+                path.join(
+                    __dirname,
+                    'sessions',
+                    this.user_id,
+                    `${this.chat_id}.json`,
+                );
 
-    const load_sessions = () => {
+            const data = {
+                is_working: this.ctx.is_working,
+                profile: this.ctx.profile,
+                last_message: this.ctx.last_message,
+                custom_profile: this.ctx.custom_profile,
+                checkpoint: this.ctx.conversation.dump_for_checkpoint(),
+            };
+
+            fs.mkdirSync(path.dirname(session_path), { recursive: true });
+
+            fs.writeFileSync(session_path, JSON.stringify(data, null, 4));
+        }
+    }
+
+    const migrate_sessions = () => {
         try {
             const data = JSON.parse(fs.readFileSync('sessions.json').toString());
 
+            fs.mkdirSync(path.join(__dirname, 'sessions'));
+
             for (const chat_id in data) {
-                chatgpt_sessions[chat_id] = chatgpt_sessions[chat_id] || {};
-
                 for (const user_id in data[chat_id]) {
-                    const session = new ChatGPTSession();
+                    const session = new ChatSession(chat_id, user_id);
+                    const session_data = data[chat_id][user_id];
 
-                    try {
-                        session.init_from_checkpoint(data[chat_id][user_id].checkpoint);
-                    } catch (err) {
-                        continue;
-                    }
+                    session.ctx.is_working = session_data.is_working;
+                    session.ctx.profile = session_data.profile;
+                    session.ctx.last_message = session_data.last_message;
+                    session.ctx.custom_profile = session_data.custom_profile;
 
-                    chatgpt_sessions[chat_id][user_id] = {
-                        session,
-                        is_working: data[chat_id][user_id].is_working,
-                        profile: data[chat_id][user_id].profile,
-                        last_message: data[chat_id][user_id].last_message,
-                        custom_profile: data[chat_id][user_id].custom_profile,
-                    };
+                    session.ctx.conversation.init_from_checkpoint(session_data.checkpoint);
+
+                    session.persist();
                 }
             }
+
+            fs.renameSync('sessions.json', 'sessions.json.bak');
         } catch (err) {
             console.log(err);
         }
     };
 
-    load_sessions();
-
-    const get_or_create_session = (chat_id, user_id) => {
-        if (!chatgpt_sessions[chat_id]?.[user_id]) {
-            reset_session(chat_id, user_id);
-        }
-
-        persist_sessions();
-
-        return chatgpt_sessions[chat_id][user_id];
-    };
+    migrate_sessions();
 
     const fetch_verbatim =
         (
@@ -570,15 +580,15 @@ const keyv = new Keyv({
                 prompt,
                 temperature,
             );
-        };    
+        };
 
-    const chunkString = (str, len) => {
+    const chunk_string = (str, len) => {
         const size = Math.ceil(str.length / len);
         const r = Array(size);
         let offset = 0;
 
         for (let i = 0; i < size; i++) {
-            r[i] = str.slice(offset, len);
+            r[i] = str.slice(offset, offset + len);
             offset += len;
         }
 
@@ -591,13 +601,11 @@ const keyv = new Keyv({
         });
     };
 
-    // {"short_name":"Sandbox","author_name":"Anonymous","author_url":"","access_token":"95768f97d2694fc0b1db8a6558b2e0dcf7b1fd832ddcaa280b3011f1b751","auth_url":"https:\/\/edit.telegra.ph\/auth\/wDIkF0t2sjwTVBZZrYiuMOeOo5V10hovT6Nw4ewwx3"}
     const createTelegraphAccount = authorName =>
         fetch(`https://api.telegra.ph/createAccount?short_name=bootlegsiri&author_name=${authorName}`)
             .then((res) => res.json())
             .then((data) => data.result);
 
-    // "path":"Sample-Page-02-07-45","url":"https:\/\/telegra.ph\/Sample-Page-02-07-45","title":"Sample Page","description":"","author_name":"Anonymous","content":[{"tag":"p","children":["Hello, world!"]}],"views":0,"can_edit":true}
     const createTelegraphPage = (accessToken, title, authorName, content) =>
         fetch(`https://api.telegra.ph/createPage?access_token=${accessToken}&title=${encodeURIComponent(title)}&author_name=${encodeURIComponent(authorName)}&content=${encodeURIComponent(content)}&return_content=false`)
             .then((res) => res.json())
@@ -660,104 +668,64 @@ const keyv = new Keyv({
         return content;
     };
 
-    const ban_list_ids = (() => {
-        let list = [];
+    class BanList {
+        constructor() {
+            this.list = [];
 
-        const ops = {
-            read: () => {
-                try {
-                    list = JSON.parse(fs.readFileSync('ban_list.json').toString());
-
-                    return list;
-                } catch (err) {
-                    return list || [];
-                }
-            },
-            write: () => {
-                fs.writeFileSync('ban_list.json', JSON.stringify(list, null, 4));
-            },
-            remove: (userid) => {
-                list = list.filter(u => u !== userid);
-
-                ops.write();
-            },
-            add: (userid) => {
-                list.push(userid);
-
-                ops.write();
-            },
-            is_banned: (userid) => {
-                return list.includes(userid);
-            },
-        };
-
-        ops.read();
-
-        return ops;
-    })();
-
-    const handle_message = async (msg) => {
-        const is_private_message = msg?.chat?.type === 'private';
-        const is_reply = msg?.reply_to_message?.text !== undefined;
-
-        if (!msg.text) {
-            return;
+            this.read();
         }
 
-        if (msg.from?.is_bot) {
-            return;
-        }
-
-        if (msg.from?.id === 51594512 && /!ban [\d\w]+/.test(msg.text)) {
-            const matches = msg.text.match(/!ban ([\d\w]+)/);
-
-            if (matches) {
-                ban_list_ids.add(matches[1]);
-            }
-
-            await sendTempMessage(
-                msg?.chat?.id,
-                'done.',
-                5000,
-            );
-
-            return;
-        }
-
-        if (msg.from?.id === 51594512 && /!unban [\d\w]+/.test(msg.text)) {
-            const matches = msg.text.match(/!unban ([\d\w]+)/);
-
-            if (matches) {
-                ban_list_ids.remove(matches[1]);
-            }
-
-            await sendTempMessage(
-                msg?.chat?.id,
-                'done.',
-                5000,
-            );
-
-            return;
-        }
-
-        if (ban_list_ids.is_banned(msg.from?.id) || ban_list_ids.is_banned(msg.from?.username)) {
-            return;
-        }
-
-        let ctx = get_or_create_session(msg.chat.id, msg.from?.id);
-
-        const setup_telegraph = async () => {
+        read() {
             try {
-                ctx.telegraph_config =
+                this.list = JSON.parse(fs.readFileSync('ban_list.json').toString());
+            } catch (err) {
+                this.list = [];
+            }
+        }
+
+        write() {
+            fs.writeFileSync('ban_list.json', JSON.stringify(this.list, null, 4));
+        }
+
+        remove(userid) {
+            this.list = this.list.filter(u => u !== userid);
+
+            this.write();
+        }
+
+        add(userid) {
+            this.list.push(userid);
+
+            this.write();
+        }
+
+        is_banned(userid) {
+            return this.list.includes(userid);
+        }
+    }
+
+    class ConversationFrame {
+        constructor(chat_session, msg, ban_list) {
+            this.chat_session = chat_session;
+            this.ctx = chat_session.ctx;
+
+            this.msg = msg;
+
+            this.ban_list = ban_list;
+        }
+
+        async setup_telegraph () {
+            try {
+                this.ctx.telegraph_config =
                     await createTelegraphAccount(
                         buildTelegraphUsername(
-                            msg.chat.id,
-                            msg.from?.id,
+                            this.msg.chat.id,
+                            this.msg.from?.id,
                         ),
                     );
             } catch (err) {
                 await sendTempMessage(
-                    msg.chat.id,
+                    this.msg.chat.id,
                     'Tried to create Telegraph account for you, but failed. Cannot give you a telegraph.',
                     3000,
                 );
@@ -766,11 +734,11 @@ const keyv = new Keyv({
 
                 return null;
             }
-        };
+        }
 
-        const create_telegraph_page = async (content) => {
-            if (!ctx.telegraph_config) {
-                if (null === await setup_telegraph()) {
+        async create_telegraph_page(content) {
+            if (!this.ctx.telegraph_config) {
+                if (null === await this.setup_telegraph()) {
                     return null;
                 }
             }
@@ -778,16 +746,16 @@ const keyv = new Keyv({
             try {
                 const page =
                     await createTelegraphPage(
-                        ctx.telegraph_config.access_token,
+                        this.ctx.telegraph_config.access_token,
                         'bootlegsiri-' + (new Date()).toISOString(),
-                        ctx.telegraph_config.author_name,
+                        this.ctx.telegraph_config.author_name,
                         JSON.stringify(parse_tgp_content(content)),
                     );
 
                 return page.url;
             } catch (err) {
                 await sendTempMessage(
-                    msg.chat.id,
+                    this.msg.chat.id,
                     'Tried to create Telegraph page for you, but failed. Cannot give you a telegraph.',
                     3000,
                 );
@@ -796,850 +764,966 @@ const keyv = new Keyv({
 
                 return null;
             }
-        };
+        }
 
-        const init = async (profile) => {
-            reset_session(msg.chat.id, msg.from?.id);
+        async init(profile) {
+            this.chat_session.reset_session();
 
-            ctx = get_or_create_session(msg.chat.id, msg.from?.id);
+            this.ctx.conversation.init_conversation(profile || 'g');
 
-            ctx.session.init_session(profile || 'g');
+            this.ctx.profile = profile || 'g';
+            this.ctx.custom_profile = null;
 
-            ctx.profile = profile || 'g';
-            ctx.custom_profile = null;
-
-            if (!ctx.telegraph_config) {
-                await setup_telegraph();
+            if (!this.ctx.telegraph_config) {
+                await this.setup_telegraph();
             }
 
-            persist_sessions();
-        };
+            this.chat_session.persist();
+        }
 
-        const init_custom = async (name, name_other, persona) => {
-            reset_session(msg.chat.id, msg.from?.id);
+        async init_custom(name, name_other, persona) {
+            this.chat_session.reset_session();
 
-            ctx = get_or_create_session(msg.chat.id, msg.from?.id);
-
-            ctx.session.init_session_custom({
+            this.ctx.conversation.init_conversation_custom({
                 name,
                 name_other,
                 persona,
             });
 
-            ctx.profile = null;
-            ctx.custom_profile = {
+            this.ctx.profile = null;
+            this.ctx.custom_profile = {
                 name,
                 name_other,
                 persona,
             };
 
-            if (!ctx.telegraph_config) {
-                await setup_telegraph();
+            if (!this.ctx.telegraph_config) {
+                await this.setup_telegraph();
             }
 
-            persist_sessions();
-        };
+            this.chat_session.persist();
+        }
 
-        if (msg.text === '!gpt4') {
-            reset_session(msg.chat.id, msg.from?.id);
+        async process_command (
+            raw_text,
+            is_verbatim = false,
+            temperature = 0.7,
+            stop = null,
+            telegram_send_cb = null,
+        ) {
 
-            ctx = get_or_create_session(msg.chat.id, msg.from?.id);
+            const is_private_message = this.msg.chat?.type === 'private';
 
-            ctx.session.with_backend(null);
+            const text = raw_text.trim();
 
-            if (!ctx.telegraph_config) {
-                await setup_telegraph();
+            if (text.trim().length === 0) {
+                return;
             }
 
-            persist_sessions();
+            let is_typing = true;
 
-            return;
-        }
+            await bot.sendChatAction(this.msg.chat.id, 'typing');
 
-        if (msg.text === '!claude') {
-            reset_session(msg.chat.id, msg.from?.id);
-
-            ctx = get_or_create_session(msg.chat.id, msg.from?.id);
-
-            ctx.session.with_backend('claude');
-
-            if (!ctx.telegraph_config) {
-                await setup_telegraph();
-            }
-
-            persist_sessions();
-
-            return;
-        }
-
-        if (msg.text === '!debug') {
-            const dump = JSON.stringify(dump_session(msg.chat.id, msg.from?.id), null, 4);
-
-            await bot.sendMessage(
-                msg.chat.id,
-                `<pre>${dump}</pre>`,
-                {
-                    parse_mode: 'html',
-                },
-            );
-
-            return;
-        }
-
-        if (msg.text === '!wo') {
-            ctx.is_working = false;
-            return;
-        }
-
-        if (ctx.is_working) {
-            return;
-        }
-
-        if (msg.text === '!help') {
-            const reply =
-                [
-                    '!ctp   - list available personas',
-                    '!ctp <persona>   - set the bot\'s persona to the specified one',
-                    '!ctpc "name" "name_other" <persona_description> - set a custom persona with the given name, alternative name, and description',
-                    '!cp <name> - set a custom persona with the given name and default alternative name and description',
-                    '!r  - reload available personas',
-                    '!cs  - clear the current session/context',
-                    '!cr  - clear the current session/context and reset to the default persona (g)',
-                    '!c  - in groups: send a message to the bot. In private: not needed, the bot treats all messages as prompts',
-                    '!debug - dump the current session/context for debugging',
-                    '!wo  - set "is_working" to false',
-                    '!help - show the help/command list message',
-                    '!vr <temperature> <text> - generate a verbatim response using the given temperature and input text',
-                    '!v <temperature> <text> - generate a verbatim response using the given temperature and input text',
-                    '!vs <temperature> <stop_sequence> <text> - generate a verbatim response using the given temperature and input text, stopping when the stop_sequence is generated',
-                    '!exp - explain the meaning/significance of the replied to message',
-                    '!explain <text> - explain the meaning/significance of the given text',
-                    '!sbs  - outline the steps of the replied to message',
-                    '!stepbystep <text> - outline the steps of the given text',
-                    '!mean  - explain the meaning of the replied to message',
-                    '!meaning <text> - explain the meaning of the given text',
-                    '!sum  - summarize the replied to message',
-                    '!summarize <text> - summarize the given text',
-                    '!expand  - elaborate on the replied to message',
-                    '!ela <text>  - elaborate on the given text',
-                    '!elaborate <text> - elaborate on the given text',
-                    '!vis  - visualize the replied to message as a graphviz digraph',
-                    '!visualize <text> - visualize the given text as a graphviz digraph',
-                    '!joke [topic]   - tell a joke, optionally about the given topic',
-                    '!cr <text>  - clear the session/context and reset to default persona (g), then respond to the given prompt',
-                    '!c <text> - respond to the given prompt (groups only, private messages are treated as prompts automatically)',
-                ].join('\n');
-
-            await bot.sendMessage(
-                msg.chat.id,
-                reply,
-            );
-
-            return;
-        }
-
-        if (msg.text === '!ctp') {
-            const profile_info =
-                Array.from(profiles.entries())
-                    .filter(([k, v]) => !v.is_private)
-                    .map(([k, v]) => {
-                        if (is_private_message) {
-                            return `<b><i>${k}</i></b> (!ctp ${k}):\n\n<i>${v.summary}</i>`;
-                        }
-
-                        return `<i>${k}</i> (!ctp ${k})`;
-                    })
-                    .join(is_private_message ? '\n\n' : ', ');
-
-            const reply =
-                is_private_message
-                    ? profile_info
-                    : 'Persona summaries are hidden in groups, send me a private message.\n\n' + profile_info;
-
-            await sendTempMessage(
-                msg.chat.id,
-                reply,
-                10000,
-                {
-                    parse_mode: 'html',
-                },
-            );
-
-            return;
-        }
-
-        if (msg.text === '!r') {
-            reload_profiles();
-            return;
-        }
-
-        if (msg.text === '!cs') {
-            await init();
-            ctx.last_message = null;
-            return;
-        }
-
-        let ctp_params = /^!ctp ([a-zA-Z1-9\-]{1,15})$/.exec(msg.text);
-
-        if (ctp_params !== null) {
-            try {
-                const profile = profiles.get(ctp_params?.[1]);
-
-                if (!profile) {
-                    await sendTempMessage(
-                        msg.chat.id,
-                        'No such persona.',
-                        3000,
-                    );
+            let x = setInterval(() => {
+                if (!is_typing) {
+                    clearInterval(x);
+                    return;
                 }
 
-                await init(ctp_params?.[1]);
+                bot.sendChatAction(this.msg.chat.id, 'typing');
+            }, 1000);
 
-                ctx.last_message = null;
+            let attempt = 0;
 
-                if (is_private_message) {
-                    await sendTempMessage(
-                        msg.chat.id,
-                        `Persona set to <i>${ctp_params?.[1]}</i>: ${profile.summary}`,
-                        3000,
+            while (true) {
+                try {
+                    console.trace('[%s] [%s] request: %s', this.msg.chat.id, this.msg.from, text);
+
+                    let response;
+
+                    try {
+                        response =
+                            is_verbatim
+                                ? await fetch_verbatim(
+                                    text,
+                                    temperature,
+                                    stop,
+                                    this.ctx.conversation.get_backend(),
+                                )
+                                : await this.ctx.conversation.send(text);
+                    } catch(err) {
+                        await sendTempMessage(
+                            this.msg.chat.id,
+                            `Error: ${err.message}`,
+                            3000,
+                            {
+                                ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                            },
+                        );
+
+                        return;
+                    }
+
+                    if (!response) {
+                        continue;
+                    }
+
+                    let tgtext = response;
+
+                    if (response.length > 4000) {
+                        const telegraph_post =
+                            await this.create_telegraph_page(
+                                response,
+                            );
+
+                        const telegraph_url = telegraph_post?.url ?? null;
+
+                        tgtext += `\n\n${telegraph_url}`;
+                    };
+
+                    console.log('[%s] [%s] response: %s', this.msg.chat.id, this.msg.from?.id, tgtext);
+
+                    //const chunks = tgtext.match(/.{1,4096}/g);
+                    const chunks = chunk_string(tgtext, 4000);
+
+                    const get_tg_msg_params = with_reply => {
+                        return with_reply
+                            ? {
+                                disable_web_page_preview: true,
+                                disable_notification: true,
+                                ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                            }
+                            : {
+                                disable_web_page_preview: true,
+                                disable_notification: true,
+                            };
+                    };
+
+                    const send_message =
+                        (
+                            chunk,
+                            with_reply = false,
+                        ) => {
+                            const fn = telegram_send_cb ?? ((...args) => bot.sendMessage(...args));
+
+                            return fn(
+                                this.msg.chat.id,
+                                chunk,
+                                get_tg_msg_params(with_reply),
+                            );
+                        };
+
+                    const try_handle_tg_error = (err, with_reply) => {
+                        const desc = err?.request?.response?.body?.description;
+
+                        switch (desc) {
+                            case 'Bad Request: message is too long':
+                                sendTempMessage(
+                                    this.msg.chat.id,
+                                    //`Message too long for Telegram.${telegraph_url ? ` Go here: ${telegraph_url}` : ''}`,
+                                    'Message too long for Telegram.',
+                                    3000,
+                                    (with_reply ? { reply_to_message_id: this.msg.message_id } : {}),
+                                );
+
+                                return -1;
+                            case 'Bad Request: message text is empty':
+                                sendTempMessage(
+                                    this.msg.chat.id,
+                                    'Model produced no output.',
+                                    3000,
+                                    (with_reply ? { reply_to_message_id: this.msg.message_id } : {}),
+                                );
+
+                                return -1;
+                        }
+
+                        return 0;
+                    };
+
+                    a: for (const chunk of chunks) {
+                        b: for (let i = 0; i < 3; ++i) {
+                            try {
+                                this.ctx.last_message =
+                                    await send_message(
+                                        chunk,
+                                        true,
+                                    );
+
+                                continue a;
+                            } catch (err) {
+                                if (try_handle_tg_error(err, true) === -1) {
+                                    break a;
+                                }
+
+                                console.log('Error sending message: %s', err.message);
+                            }
+
+                            await sleep(5000);
+                        }
+
+                        console.log('Failed to send message, trying without replying to message..');
+
+                        for (let i = 0; i < 3; ++i) {
+                            try {
+                                this.ctx.last_message =
+                                    await send_message(
+                                        chunk,
+                                        false,
+                                    );
+
+                                continue a;
+                            } catch (err) {
+                                console.log('Error sending message: %s', err.message);
+                            }
+
+                            await sleep(5000);
+                        }
+                    }
+
+                    await sleep(5000);
+
+                    break;
+                } catch (err) {
+                    console.log(err);
+
+                    if (attempt > 10) {
+                        is_typing = false;
+
+                        return;
+                    }
+
+                    attempt += 1;
+                }
+
+                await new Promise((resolve) => {
+                    setTimeout(resolve, 3000);
+                });
+            }
+
+            is_typing = false;
+        }
+
+        async do_msg_things (
+            raw_text,
+            is_verbatim = false,
+            temperature = 0.7,
+            stop = null,
+            telegram_send_cb = null,
+        ) {
+            this.ctx.is_working = true;
+
+            try {
+                await this.process_command(
+                    raw_text,
+                    is_verbatim,
+                    temperature,
+                    stop,
+                    telegram_send_cb,
+                );
+            } catch (err) {
+                console.log(err);
+            }
+
+            this.ctx.is_working = false;
+
+            this.chat_session.persist();
+        }
+
+        async send_profile_reminder_if_needed () {
+            const last_message_date = this.ctx?.last_message?.date * 1000 ?? 0;
+
+            if (last_message_date === 0) {
+                return;
+            }
+
+            const now = Date.now();
+
+            const delta = now - last_message_date;
+
+            if (delta > 1000 * 60 * 60 * 2) { // 2 hours
+                const has_profile = this.ctx?.profile;
+                const has_custom_profile = this.ctx?.custom_profile;
+
+                if (!has_profile && !has_custom_profile) {
+                    return;
+                }
+
+                const username = this.msg?.from?.username;
+                const username_highlight = username ? `@${username} ` : '';
+
+                const is_private = this.msg.chat?.type === 'private';
+                const reply_prefix = is_private ? '' : username_highlight;
+
+                await sendTempMessage(
+                    this.msg.chat.id,
+                    `<b>${reply_prefix}Reminder: you were idle for more than 2 hours and have a ${ has_custom_profile ? 'custom ' : '' } profile set. You can reset it by using !cs or by loading a new profile via !ctp «profile».</b>`,
+                    5000,
+                    { parse_mode: 'HTML' },
+                );
+            }
+        }
+
+        async process () {
+            const is_private_message = this.msg.chat?.type === 'private';
+            const is_reply = this.msg.reply_to_message?.text !== undefined;
+
+            this.send_profile_reminder_if_needed();
+
+            if (!this.msg.text) {
+                return;
+            }
+
+            if (this.msg.from?.is_bot) {
+                return;
+            }
+
+            if (this.msg.from?.id === 51594512 && /!ban \w+/.test(this.msg.text)) {
+                const matches = this.msg.text.match(/!ban (\w+)/);
+
+                if (matches) {
+                    this.ban_list.add(matches[1]);
+                }
+
+                await sendTempMessage(
+                    this.msg.chat?.id,
+                    'done.',
+                    5000,
+                );
+
+                return;
+            }
+
+            if (this.msg.from?.id === 51594512 && /!unban [\d\w]+/.test(this.msg.text)) {
+                const matches = this.msg.text.match(/!unban ([\d\w]+)/);
+
+                if (matches) {
+                    this.ban_list.remove(matches[1]);
+                }
+
+                await sendTempMessage(
+                    this.msg.chat?.id,
+                    'done.',
+                    5000,
+                );
+
+                return;
+            }
+
+            if (this.ban_list.is_banned(this.msg.from?.id) || this.ban_list.is_banned(this.msg.from?.username)) {
+                return;
+            }
+
+            if (this.msg.text === '!gpt4') {
+                this.chat_session.reset_session();
+
+                this.ctx.conversation.with_backend(null);
+
+                if (!this.ctx.telegraph_config) {
+                    await this.setup_telegraph();
+                }
+
+                this.chat_session.persist();
+
+                return;
+            }
+
+            if (this.msg.text === '!claude') {
+                this.chat_session.reset_session();
+
+                this.ctx.conversation.with_backend('claude');
+
+                if (!this.ctx.telegraph_config) {
+                    await this.setup_telegraph();
+                }
+
+                persist_sessions();
+
+                return;
+            }
+
+            if (this.msg.text === '!debug') {
+                const dump = JSON.stringify(dump_session(this.msg.chat.id, this.msg.from?.id), null, 4);
+
+                const chunks = chunk_string(dump, 4000);
+
+                for (const chunk of chunks) {
+                    await bot.sendMessage(
+                        this.msg.chat.id,
+                        `<pre language="json">${chunk}</pre>`,
                         {
                             parse_mode: 'html',
                         },
                     );
                 }
-            } catch (err) {
-                console.log(err);
+
+                return;
             }
 
-            return;
-        }
-
-        let ctpc_params = /^!ctpc "([^"]{1,50})" "([^"]{1,50})" (.*)$/ig.exec(msg.text);
-
-        if (ctpc_params !== null && ctpc_params?.[1] && ctpc_params?.[2] && ctpc_params?.[3]) {
-            try {
-                if (!ctpc_params?.[3].toLocaleLowerCase().includes(ctpc_params?.[1].toLocaleLowerCase())) {
-                    await sendTempMessage(
-                        msg.chat.id,
-                        `I can't find your persona name in your persona description, that's probably dumb.`,
-                        3000,
-                        {
-                            ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                        },
-                    );
-                }
-
-                await init_custom(
-                    ctpc_params?.[1],
-                    ctpc_params?.[2],
-                    ctpc_params?.[3],
-                );
-
-                ctx.last_message = null;
-
-                await sendTempMessage(
-                    msg.chat.id,
-                    `Custom persona set! Name: ${ctpc_params?.[1]} Name (other): ${ctpc_params?.[2]}`,
-                    3000,
-                    {
-                        ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                    },
-                );
-            } catch (err) {
-                console.log(err);
+            if (this.msg.text === '!wo') {
+                this.ctx.is_working = false;
+                return;
             }
 
-            return;
-        }
-
-        if (msg.text.indexOf('!ctpc') === 0) {
-            await sendTempMessage(
-                msg.chat.id,
-                `Invalid command, missing a quote? Try \`!ctpc "Your name" "Their name" <persona description>\``,
-                3000,
-                {
-                    ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                    parse_mode: 'MarkdownV2',
-                },
-            );
-
-            return;
-        }
-
-        let cp_params = /^!cp (.*)$/ig.exec(msg.text);
-
-        if (cp_params !== null && cp_params?.[1]) {
-            try {
-                await init_custom(
-                    cp_params?.[1],
-                    'User',
-                    `You are ${cp_params?.[1]}.`,
-                );
-
-                ctx.last_message = null;
-
-                await sendTempMessage(
-                    msg.chat.id,
-                    `Custom persona set! Name: ${cp_params?.[1]} Name (other): User`,
-                    3000,
-                    {
-                        ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                    },
-                );
-            } catch (err) {
-                console.log(err);
+            if (this.ctx.is_working) {
+                return;
             }
 
-            return;
-        }
-
-        if (msg.text.indexOf('!cp') === 0) {
-            await sendTempMessage(
-                msg.chat.id,
-                `Invalid command? Try \`!cp Albert Einstein\``,
-                3000,
-                {
-                    ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                    parse_mode: 'MarkdownV2',
-                },
-            );
-
-            return;
-        }
-
-        // if message starts with !cr, reinit the session using the profile "g"
-        if (msg.text?.startsWith('!cr')) {
-            await init('g');
-
-            ctx.last_message = null;
-        }
-
-        const handle_msg =
-            async (
-                raw_text,
-                is_verbatim = false,
-                temperature = 0.7,
-                stop = null,
-                telegram_send_cb = null,
-            ) => {
-                const text = raw_text.trim();
-
-                if (text.trim().length === 0) {
-                    return;
-                }
-
-                let is_typing = true;
-
-                await bot.sendChatAction(msg.chat.id, 'typing');
-
-                let x = setInterval(() => {
-                    if (!is_typing) {
-                        clearInterval(x);
-                        return;
-                    }
-
-                    bot.sendChatAction(msg.chat.id, 'typing');
-                }, 1000);
-
-                let attempt = 0;
-
-                while (true) {
-                    try {
-                        console.trace('[%s] [%s] request: %s', msg.chat.id, msg.from, text);
-
-                        let response;
-
-                        try {
-                            response =
-                                is_verbatim
-                                    ? await fetch_verbatim(
-                                        text,
-                                        temperature,
-                                        stop,
-                                        ctx.session.get_backend(),
-                                    )
-                                    : await ctx.session.send(text);
-                        } catch(err) {
-                            await sendTempMessage(
-                                msg.chat.id,
-                                `Error: ${err.message}`,
-                                3000,
-                                {
-                                    ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                                },
-                            );
-
-                            return;
-                        }
-
-                        if (!response) {
-                            continue;
-                        }
-
-                        let tgtext = response;
-
-                        if (response.length > 4096) {
-                            const telegraph_post =
-                                await create_telegraph_page(
-                                    response,
-                                );
-
-                            const telegraph_url = telegraph_post?.url ?? null;
-
-                            tgtext += `\n\n${telegraph_url}`;
-                        };
-
-                        console.log('[%s] [%s] response: %s', msg.chat.id, msg.from?.id, tgtext);
-
-                        //const chunks = tgtext.match(/.{1,4096}/g);
-                        const chunks = chunkString(tgtext, 4000);
-
-                        const get_tg_msg_params = with_reply => {
-                            return with_reply
-                                ? {
-                                    disable_web_page_preview: true,
-                                    disable_notification: true,
-                                    ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
-                                }
-                                : {
-                                    disable_web_page_preview: true,
-                                    disable_notification: true,
-                                };
-                        };
-
-                        const send_message =
-                            (
-                                chunk,
-                                with_reply = false,
-                            ) => {
-                                const fn = telegram_send_cb ?? ((...args) => bot.sendMessage(...args));
-
-                                return fn(
-                                    msg.chat.id,
-                                    chunk,
-                                    get_tg_msg_params(with_reply),
-                                );
-                            };
-
-                        const try_handle_tg_error = (err, with_reply) => {
-                            const desc = err?.request?.response?.body?.description;
-
-                            switch (desc) {
-                                case 'Bad Request: message is too long':
-                                    sendTempMessage(
-                                        msg.chat.id,
-                                        `Message too long for Telegram.${telegraph_url ? ` Go here: ${telegraph_url}` : ''}`,
-                                        3000,
-                                        (with_reply ? { reply_to_message_id: msg.message_id } : {}),
-                                    );
-
-                                    return -1;
-                                case 'Bad Request: message text is empty':
-                                    sendTempMessage(
-                                        msg.chat.id,
-                                        'Model produced no output.',
-                                        3000,
-                                        (with_reply ? { reply_to_message_id: msg.message_id } : {}),
-                                    );
-
-                                    return -1;
-                            }
-
-                            return 0;
-                        };
-
-                        a: for (const chunk of chunks) {
-                            b: for (let i = 0; i < 3; ++i) {
-                                try {
-                                    ctx.last_message =
-                                        await send_message(
-                                            chunk,
-                                            true,
-                                        );
-
-                                    continue a;
-                                } catch (err) {
-                                    if (try_handle_tg_error(err, true) === -1) {
-                                        break a;
-                                    }
-
-                                    console.log('Error sending message: %s', err.message);
-                                }
-
-                                await sleep(5000);
-                            }
-
-                            console.log('Failed to send message, trying without replying to message..');
-
-                            for (let i = 0; i < 3; ++i) {
-                                try {
-                                    ctx.last_message =
-                                        await send_message(
-                                            chunk,
-                                            false,
-                                        );
-
-                                    continue a;
-                                } catch (err) {
-                                    console.log('Error sending message: %s', err.message);
-                                }
-
-                                await sleep(5000);
-                            }
-                        }
-
-                        await sleep(5000);
-
-                        break;
-                    } catch (err) {
-                        console.log(err);
-
-                        if (attempt > 10) {
-                            return;
-                        }
-
-                        attempt += 1;
-                    }
-
-                    await new Promise((resolve) => {
-                        setTimeout(resolve, 3000);
-                    });
-                }
-
-                is_typing = false;
-            };
-
-        const do_msg_things = async (...args) => {
-            ctx.is_working = true;
-
-            try {
-                await handle_msg(...args);
-            } catch (err) {
-                console.log(err);
-            }
-
-            ctx.is_working = false;
-
-            persist_sessions();
-        };
-
-        const verbatim_response = /^!vr\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(msg.text);
-
-        if (verbatim_response && (is_reply && verbatim_response[2])) {
-            await do_msg_things(
-                `----Message:----${msg?.reply_to_message?.text}----${verbatim_response[2]}----`,
-                true,
-                parseFloat(verbatim[1]) || 0.7,
-                '----',
-            );
-
-            return;
-        }
-
-        const verbatim = /^!v\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(msg.text);
-
-        if (verbatim && verbatim[2]) {
-            await do_msg_things(
-                `${verbatim[2]}----`,
-                true,
-                parseFloat(verbatim[1]) || 0.7,
-                '----',
-            );
-
-            return;
-        }
-
-        const verbatim_claude = /^!vc\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(msg.text);
-
-        if (verbatim_claude && verbatim_claude[2]) {
-            ctx.is_working = true;
-
-            await bot.sendChatAction(msg.chat.id, 'typing');
-
-            try {
-                const response = await fetch_absolutely_verbatim(
-                    verbatim_claude[2],
-                );
+            if (this.msg.text === '!help') {
+                const reply =
+                    [
+                        '!ctp   - list available personas',
+                        '!ctp <persona>   - set the bot\'s persona to the specified one',
+                        '!ctpc "name" "name_other" <persona_description> - set a custom persona with the given name, alternative name, and description',
+                        '!cp <name> - set a custom persona with the given name and default alternative name and description',
+                        '!r  - reload available personas',
+                        '!cs  - clear the current session/context',
+                        '!cr  - clear the current session/context and reset to the default persona (g)',
+                        '!c  - in groups: send a message to the bot. In private: not needed, the bot treats all messages as prompts',
+                        '!debug - dump the current session/context for debugging',
+                        '!wo  - set "is_working" to false',
+                        '!help - show the help/command list message',
+                        '!vr <temperature> <text> - generate a verbatim response using the given temperature and input text',
+                        '!v <temperature> <text> - generate a verbatim response using the given temperature and input text',
+                        '!vs <temperature> <stop_sequence> <text> - generate a verbatim response using the given temperature and input text, stopping when the stop_sequence is generated',
+                        '!exp - explain the meaning/significance of the replied to message',
+                        '!explain <text> - explain the meaning/significance of the given text',
+                        '!sbs  - outline the steps of the replied to message',
+                        '!stepbystep <text> - outline the steps of the given text',
+                        '!mean  - explain the meaning of the replied to message',
+                        '!meaning <text> - explain the meaning of the given text',
+                        '!sum  - summarize the replied to message',
+                        '!summarize <text> - summarize the given text',
+                        '!expand  - elaborate on the replied to message',
+                        '!ela <text>  - elaborate on the given text',
+                        '!elaborate <text> - elaborate on the given text',
+                        '!vis  - visualize the replied to message as a graphviz digraph',
+                        '!visualize <text> - visualize the given text as a graphviz digraph',
+                        '!joke [topic]   - tell a joke, optionally about the given topic',
+                        '!cr <text>  - clear the session/context and reset to default persona (g), then respond to the given prompt',
+                        '!c <text> - respond to the given prompt (groups only, private messages are treated as prompts automatically)',
+                    ].join('\n');
 
                 await bot.sendMessage(
-                    msg.chat.id,
-                    response,
+                    this.msg.chat.id,
+                    reply,
+                );
+
+                return;
+            }
+
+            if (this.msg.text === '!ctp') {
+                const profile_info =
+                    Array.from(profiles.entries())
+                        .filter(([k, v]) => !v.is_private)
+                        .map(([k, v]) => {
+                            if (is_private_message) {
+                                return `<b><i>${k}</i></b> (!ctp ${k}):\n\n<i>${v.summary}</i>`;
+                            }
+
+                            return `<i>${k}</i> (!ctp ${k})`;
+                        })
+                        .join(is_private_message ? '\n\n' : ', ');
+
+                const reply =
+                    is_private_message
+                        ? profile_info
+                        : 'Persona summaries are hidden in groups, send me a private message.\n\n' + profile_info;
+
+                await sendTempMessage(
+                    this.msg.chat.id,
+                    reply,
+                    10000,
                     {
-                        disable_web_page_preview: true,
-                        disable_notification: true,
-                        ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
+                        parse_mode: 'html',
                     },
                 );
-            } catch (err) {
-                console.log(err);
 
+                return;
+            }
+
+            if (this.msg.text === '!r') {
+                reload_profiles();
+                return;
+            }
+
+            if (this.msg.text === '!cs') {
+                await this.init();
+                this.ctx.last_message = null;
+                return;
+            }
+
+            let ctp_params = /^!ctp ([a-zA-Z1-9\-]{1,15})$/.exec(this.msg.text);
+
+            if (ctp_params !== null) {
                 try {
+                    const profile = profiles.get(ctp_params?.[1]);
+
+                    if (!profile) {
+                        await sendTempMessage(
+                            this.msg.chat.id,
+                            'No such persona.',
+                            3000,
+                        );
+                    }
+
+                    await this.init(ctp_params?.[1]);
+
+                    this.ctx.last_message = null;
+
+                    if (is_private_message) {
+                        await sendTempMessage(
+                            this.msg.chat.id,
+                            `Persona set to <i>${ctp_params?.[1]}</i>: ${profile.summary}`,
+                            3000,
+                            {
+                                parse_mode: 'html',
+                            },
+                        );
+                    }
+                } catch (err) {
+                    console.log(err);
+                }
+
+                return;
+            }
+
+            let ctpc_params = /^!ctpc "([^"]{1,50})" "([^"]{1,50})" (.*)$/ig.exec(this.msg.text);
+
+            if (ctpc_params !== null && ctpc_params?.[1] && ctpc_params?.[2] && ctpc_params?.[3]) {
+                try {
+                    if (!ctpc_params?.[3].toLocaleLowerCase().includes(ctpc_params?.[1].toLocaleLowerCase())) {
+                        await sendTempMessage(
+                            this.msg.chat.id,
+                            `I can't find your persona name in your persona description, that's probably dumb.`,
+                            3000,
+                            {
+                                ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                            },
+                        );
+                    }
+
+                    await this.init_custom(
+                        ctpc_params?.[1],
+                        ctpc_params?.[2],
+                        ctpc_params?.[3],
+                    );
+
+                    this.ctx.last_message = null;
+
                     await sendTempMessage(
-                        msg.chat.id,
-                        `Error: ${err.message}`,
+                        this.msg.chat.id,
+                        `Custom persona set! Name: ${ctpc_params?.[1]} Name (other): ${ctpc_params?.[2]}`,
                         3000,
                         {
-                            ...(is_private_message ? {} : { reply_to_message_id: msg.message_id }),
+                            ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
                         },
                     );
-                } catch {}
+                } catch (err) {
+                    console.log(err);
+                }
+
+                return;
             }
 
-            ctx.is_working = false;
+            if (this.msg.text.indexOf('!ctpc') === 0) {
+                await sendTempMessage(
+                    this.msg.chat.id,
+                    `Invalid command, missing a quote? Try \`!ctpc "Your name" "Their name" <persona description>\``,
+                    3000,
+                    {
+                        ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                        parse_mode: 'MarkdownV2',
+                    },
+                );
 
-            return;
-        }
+                return;
+            }
 
-        const verbatim_stop = /^!vs\s(\d+\.\d\d?)\s(\S+)?\s([\s\S]+)$/ig.exec(msg.text);
+            let cp_params = /^!cp (.*)$/ig.exec(this.msg.text);
 
-        if (verbatim_stop && verbatim_stop[1] && verbatim_stop[2] && verbatim_stop[3]) {
-            await do_msg_things(
-                verbatim_stop[3],
-                true,
-                0.7,
-                verbatim_stop[2],
-            );
+            if (cp_params !== null && cp_params?.[1]) {
+                try {
+                    await this.init_custom(
+                        cp_params?.[1],
+                        'User',
+                        `You are ${cp_params?.[1]}.`,
+                    );
 
-            return;
-        }
+                    this.ctx.last_message = null;
 
-        const explain = /^(!exp|!explain)(\s[\s\S]+)?$/ig.exec(msg.text);
+                    await sendTempMessage(
+                        this.msg.chat.id,
+                        `Custom persona set! Name: ${cp_params?.[1]} Name (other): User`,
+                        3000,
+                        {
+                            ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                        },
+                    );
+                } catch (err) {
+                    console.log(err);
+                }
 
-        if (explain && is_reply) {
-            await do_msg_things(
-                `----Message:----\n${is_reply ? msg?.reply_to_message?.text : explain[2]}\n----Explain ${is_reply ? (explain[2] || '') : ''}:----\n`,
-                true,
-                0.7,
-                '----',
-            );
+                return;
+            }
 
-            return;
-        }
+            if (this.msg.text.indexOf('!cp') === 0) {
+                await sendTempMessage(
+                    this.msg.chat.id,
+                    `Invalid command? Try \`!cp Albert Einstein\``,
+                    3000,
+                    {
+                        ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                        parse_mode: 'MarkdownV2',
+                    },
+                );
 
-        if (explain && (!is_reply && explain[2])) {
-            await do_msg_things(
-                `Explain ${is_reply ? (explain[2] || '') : ''}:----\n`,
-                true,
-                0.7,
-                '----',
-            );
+                return;
+            }
 
-            return;
-        }
+            // if message starts with !cr, reinit the session using the profile "g"
+            if (this.msg.text?.startsWith('!cr')) {
+                await this.init('g');
 
-        const step_by_step = /^(!sbs|!stepbystep)(\s[\s\S]+)?$/ig.exec(msg.text);
+                this.ctx.last_message = null;
+            }
 
-        if (step_by_step && is_reply) {
-            await do_msg_things(
-                `----Message:----\n${is_reply ? msg?.reply_to_message?.text : step_by_step[2]}\n----Outline the message step by step ${is_reply ? (step_by_step[2] ? `(${step_by_step[2]})` : '') : ''}:----\n1.`,
-                true,
-                0.7,
-                '----',
-                (chat, msg, opts) => bot.sendMessage(chat, `1. ${msg}`, opts),
-            );
+            const verbatim_response = /^!vr\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(this.msg.text);
 
-            return;
-        }
+            if (verbatim_response && (is_reply && verbatim_response[2])) {
+                await this.do_msg_things(
+                    `----Message:----${this.msg.reply_to_message?.text}----${verbatim_response[2]}----`,
+                    true,
+                    parseFloat(verbatim[1]) || 0.7,
+                    '----',
+                );
 
-        if (step_by_step && (!is_reply && step_by_step[2])) {
-            await do_msg_things(
-                `Outline step by step in the form of a list: ${step_by_step[2]}----\n1.`,
-                true,
-                0.7,
-                '----',
-                (chat, msg, opts) => bot.sendMessage(chat, `1. ${msg}`, opts),
-            );
+                return;
+            }
 
-            return;
-        }
+            const verbatim = /^!v\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(this.msg.text);
 
-        const meaning = /^(!mean|!meaning)(\s[\s\S]+)?$/ig.exec(msg.text);
+            if (verbatim && verbatim[2]) {
+                await this.do_msg_things(
+                    `${verbatim[2]}----`,
+                    true,
+                    parseFloat(verbatim[1]) || 0.7,
+                    '----',
+                );
 
-        if (meaning && is_reply) {
-            await do_msg_things(
-                `----Message:----\n${is_reply ? msg?.reply_to_message?.text : meaning[2]}\n----Meaning of the message ${is_reply ? (meaning[2] ? `(${meaning[2]})` : '') : ''}:----\n`,
-                true,
-                0.7,
-                '----',
-            );
+                return;
+            }
 
-            return;
-        }
+            const verbatim_claude = /^!vc\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(this.msg.text);
 
-        if (meaning && (!is_reply && meaning[2])) {
-            await do_msg_things(
-                `Explain the meaning of ${meaning[2]}:----\n`,
-                true,
-                0.7,
-                '----',
-            );
+            if (verbatim_claude && verbatim_claude[2]) {
+                this.ctx.is_working = true;
 
-            return;
-        }
+                await bot.sendChatAction(this.msg.chat.id, 'typing');
 
-        const summarize = /^(!sum|!summarize)(\s[\s\S]+)?$/ig.exec(msg.text);
+                try {
+                    const response = await fetch_absolutely_verbatim(
+                        verbatim_claude[2],
+                    );
 
-        if (summarize && is_reply) {
-            await do_msg_things(
-                `----Message:----\n${is_reply ? msg?.reply_to_message?.text : summarize[2]}\n----Summarize the message ${is_reply ? (summarize[2] ? `(${summarize[2]})` : '') : ''}:----\n`,
-                true,
-                0.7,
-                '----',
-            );
+                    await bot.sendMessage(
+                        this.msg.chat.id,
+                        response,
+                        {
+                            disable_web_page_preview: true,
+                            disable_notification: true,
+                            ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                        },
+                    );
+                } catch (err) {
+                    console.log(err);
 
-            return;
-        }
-
-        if (summarize && (!is_reply && summarize[2])) {
-            await do_msg_things(
-                `Write a summary of: ${summarize[2]}----\n`,
-                true,
-                0.7,
-                '----',
-            );
-
-            return;
-        }
-
-        const expand = /^(!expand|!ela|!elaborate)(\s[\s\S]+)?$/ig.exec(msg.text);
-
-        if (expand && is_reply) {
-            await do_msg_things(
-                `----Message:----\n${is_reply ? msg?.reply_to_message?.text : expand[2]}\n----Elaborate further ${is_reply ? (expand[2] ? `on ${expand[2]}` : '') : ''}:----\n`,
-                true,
-                0.7,
-                '----',
-            );
-
-            return;
-        }
-
-        if (expand && (!is_reply && expand[2])) {
-            await do_msg_things(
-                `Elaborate on: ${expand[2]}----\n`,
-                true,
-                0.7,
-                '----',
-            );
-
-            return;
-        }
-
-        const visualize = /^(!vis|!visualize)(\s[\s\S]+)?$/ig.exec(msg.text);
-
-        const render_graphviz =
-            (chat, data, opts) =>
-                new Promise((res, rej) => {
-                    console.log(`digraph G {\n${data}`);
-
-                    const domain = require('node:domain').create();
-
-                    const error = err => {
-                        console.log(err);
-
-                        sendTempMessage(
-                            chat,
-                            'Ooops... Something went wrong. Please try again. (The model probably produced garbage.)',
+                    try {
+                        await sendTempMessage(
+                            this.msg.chat.id,
+                            `Error: ${err.message}`,
                             3000,
-                            opts,
-                        ).then(res, rej);
-                    };
-
-                    domain.on('error', error);
-
-                    domain.run(() => {
-                        data = data.split(/digraph G {/gs);
-                        data = "digraph G {" + data[data.length - 1];
-
-                        const sanitized_data =
-                            data
-                                .replace(
-                                    /(\b\w[^\s]*\b)(?=\s*->)/gu,
-                                    match => `“${match}"`,
-                                )
-                                .replace(
-                                    /->\s*([^\s\[]*)(?=\s*(->|\[label))/g,
-                                    (match, p1) => `-> “${p1}"`,
-                                );
-
-                        const svg = graphviz.dot(
-                            sanitized_data.trim().startsWith('digraph G {')
-                                ? sanitized_data
-                                : `digraph G {\n${sanitized_data}`,
+                            {
+                                ...(is_private_message ? {} : { reply_to_message_id: this.msg.message_id }),
+                            },
                         );
+                    } catch {}
+                }
 
-                        sharp(Buffer.from(svg))
-                            .png()
-                            .resize(
+                this.ctx.is_working = false;
+
+                return;
+            }
+
+            const verbatim_stop = /^!vs\s(\d+\.\d\d?)\s(\S+)?\s([\s\S]+)$/ig.exec(this.msg.text);
+
+            if (verbatim_stop && verbatim_stop[1] && verbatim_stop[2] && verbatim_stop[3]) {
+                await this.do_msg_things(
+                    verbatim_stop[3],
+                    true,
+                    0.7,
+                    verbatim_stop[2],
+                );
+
+                return;
+            }
+
+            const explain = /^(!exp|!explain)(\s[\s\S]+)?$/ig.exec(this.msg.text);
+
+            if (explain && is_reply) {
+                await this.do_msg_things(
+                    `----Message:----\n${is_reply ? this.msg?.reply_to_message?.text : explain[2]}\n----Explain ${is_reply ? (explain[2] || '') : ''}:----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            if (explain && (!is_reply && explain[2])) {
+                await this.do_msg_things(
+                    `Explain ${is_reply ? (explain[2] || '') : ''}:----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            const step_by_step = /^(!sbs|!stepbystep)(\s[\s\S]+)?$/ig.exec(this.msg.text);
+
+            if (step_by_step && is_reply) {
+                await this.do_msg_things(
+                    `----Message:----\n${is_reply ? this.msg?.reply_to_message?.text : step_by_step[2]}\n----Outline the message step by step ${is_reply ? (step_by_step[2] ? `(${step_by_step[2]})` : '') : ''}:----\n1.`,
+                    true,
+                    0.7,
+                    '----',
+                    (chat, msg, opts) => bot.sendMessage(chat, `1. ${msg}`, opts),
+                );
+
+                return;
+            }
+
+            if (step_by_step && (!is_reply && step_by_step[2])) {
+                await this.do_msg_things(
+                    `Outline step by step in the form of a list: ${step_by_step[2]}----\n1.`,
+                    true,
+                    0.7,
+                    '----',
+                    (chat, msg, opts) => bot.sendMessage(chat, `1. ${msg}`, opts),
+                );
+
+                return;
+            }
+
+            const meaning = /^(!mean|!meaning)(\s[\s\S]+)?$/ig.exec(this.msg.text);
+
+            if (meaning && is_reply) {
+                await this.do_msg_things(
+                    `----Message:----\n${is_reply ? this.msg?.reply_to_message?.text : meaning[2]}\n----Meaning of the message ${is_reply ? (meaning[2] ? `(${meaning[2]})` : '') : ''}:----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            if (meaning && (!is_reply && meaning[2])) {
+                await this.do_msg_things(
+                    `Explain the meaning of ${meaning[2]}:----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            const summarize = /^(!sum|!summarize)(\s[\s\S]+)?$/ig.exec(this.msg.text);
+
+            if (summarize && is_reply) {
+                await this.do_msg_things(
+                    `----Message:----\n${is_reply ? this.msg?.reply_to_message?.text : summarize[2]}\n----Summarize the message ${is_reply ? (summarize[2] ? `(${summarize[2]})` : '') : ''}:----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            if (summarize && (!is_reply && summarize[2])) {
+                await this.do_msg_things(
+                    `Write a summary of: ${summarize[2]}----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            const expand = /^(!expand|!ela|!elaborate)(\s[\s\S]+)?$/ig.exec(this.msg.text);
+
+            if (expand && is_reply) {
+                await this.do_msg_things(
+                    `----Message:----\n${is_reply ? this.msg?.reply_to_message?.text : expand[2]}\n----Elaborate further ${is_reply ? (expand[2] ? `on ${expand[2]}` : '') : ''}:----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            if (expand && (!is_reply && expand[2])) {
+                await this.do_msg_things(
+                    `Elaborate on: ${expand[2]}----\n`,
+                    true,
+                    0.7,
+                    '----',
+                );
+
+                return;
+            }
+
+            const visualize = /^(!vis|!visualize)(\s[\s\S]+)?$/ig.exec(this.msg.text);
+
+            const render_graphviz =
+                (chat, data, opts) =>
+                    new Promise((res, rej) => {
+                        console.log(`digraph G {\n${data}`);
+
+                        const domain = require('node:domain').create();
+
+                        const error = err => {
+                            console.log(err);
+
+                            sendTempMessage(
+                                chat,
+                                'Ooops... Something went wrong. Please try again. (The model probably produced garbage.)',
                                 3000,
-                                3000,
-                                {
-                                    fit: 'inside',
-                                },
-                            )
-                            .toBuffer()
-                            .then((buffer) =>
-                                bot.sendPhoto(
-                                    chat,
-                                    buffer,
-                                    opts,
-                                    {
-                                        contentType: 'image/png',
-                                        filename: `graph-${Date.now()}.png`,
-                                    },
-                                ).then(res, error),
-                                error,
+                                opts,
+                            ).then(res, rej);
+                        };
+
+                        domain.on('error', error);
+
+                        domain.run(() => {
+                            data = data.split(/digraph G {/gs);
+                            data = "digraph G {" + data[data.length - 1];
+
+                            const sanitized_data =
+                                data
+                                    .replace(
+                                        /(\b\w\S*\b)(?=\s*->)/gu,
+                                        match => `“${match}"`,
+                                    )
+                                    .replace(
+                                        /->\s*([^\s\[]*)(?=\s*(->|\[label))/g,
+                                        (match, p1) => `-> “${p1}"`,
+                                    );
+
+                            const svg = graphviz.dot(
+                                sanitized_data.trim().startsWith('digraph G {')
+                                    ? sanitized_data
+                                    : `digraph G {\n${sanitized_data}`,
                             );
-                    });
-                });
 
-        if (visualize && (is_reply || visualize[2])) {
-            await do_msg_things(
-                `----Text----\n${is_reply ? msg?.reply_to_message?.text : visualize[2]}\n----Visualise as a detailed and elaborate graphviz digraph code, do not use special characters and ensure to properly escape all node and label names ${is_reply ? (visualize[2] ? `(${visualize[2]})` : '') : ''}:----\ndigraph G {`,
-                true,
-                0.7,
-                '----',
-                render_graphviz,
+                            sharp(Buffer.from(svg))
+                                .png()
+                                .resize(
+                                    3000,
+                                    3000,
+                                    {
+                                        fit: 'inside',
+                                    },
+                                )
+                                .toBuffer()
+                                .then((buffer) =>
+                                    bot.sendPhoto(
+                                        chat,
+                                        buffer,
+                                        opts,
+                                        {
+                                            contentType: 'image/png',
+                                            filename: `graph-${Date.now()}.png`,
+                                        },
+                                    ).then(res, error),
+                                    error,
+                                );
+                        });
+                    });
+
+            if (visualize && (is_reply || visualize[2])) {
+                await this.do_msg_things(
+                    `----Text----\n${is_reply ? this.msg?.reply_to_message?.text : visualize[2]}\n----Visualise as a detailed and elaborate graphviz digraph code, do not use special characters and ensure to properly escape all node and label names ${is_reply ? (visualize[2] ? `(${visualize[2]})` : '') : ''}:----\ndigraph G {`,
+                    true,
+                    0.7,
+                    '----',
+                    render_graphviz,
+                );
+
+                return;
+            }
+
+            const joke = /^!joke\s?([\s\S]+)$/ig.exec(this.msg.text);
+
+            if (joke) {
+                if (joke[1]) {
+                    await this.do_msg_things('Tell me a joke about ' + joke[1]);
+                } else {
+                    await this.do_msg_things('Tell me a joke');
+                }
+
+                return;
+            }
+
+            const cr = /^(!cr|!c)?\s?([\s\S]+)$/ig.exec(this.msg.text);
+
+            if (cr && (cr[1] || is_private_message)) {
+                if (
+                    cr?.[1] === '!cr'
+                    || (
+                        this.ctx.profile === null
+                        && !this.ctx.custom_profile
+                        && this.ctx.last_message === null
+                    )
+                ) {
+                    await this.init('g');
+                }
+
+                await this.do_msg_things(cr[2]);
+
+                return;
+            }
+        }
+
+        static async from_message(msg, ban_list) {
+            const ctx = new ChatSession(
+                msg.chat.id,
+                msg.from?.id,
             );
 
-            return;
+            const session =
+                new ConversationFrame(
+                    chat_session,
+                    msg,
+                    ban_list,
+                );
+
+            await session.process();
         }
+    }
 
-        const joke = /^!joke\s?([\s\S]+)$/ig.exec(msg.text);
-
-        if (joke) {
-            if (joke[1]) {
-                await do_msg_things('Tell me a joke about ' + joke[1]);
-            } else {
-                await do_msg_things('Tell me a joke');
-            }
-
-            return;
-        }
-
-        const cr = /^(!cr|!c)?\s?([\s\S]+)$/ig.exec(msg.text);
-
-        if (cr && (cr[1] || is_private_message)) {
-            if (
-                cr?.[1] === '!cr'
-                || (
-                    ctx.profile === null
-                    && !ctx.custom_profile
-                    && ctx.last_message === null
-                )
-            ) {
-                await init('g');
-            }
-
-            await do_msg_things(cr[2]);
-
-            return;
-        }
-    };
+    const ban_list = new BanList();
 
     bot.on('message', async msg => {
         try {
-            await handle_message(msg);
+            await ConversationFrame.from_message(msg, ban_list);
         } catch (err) {
             console.log(err);
         }
