@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@dqbd/tiktoken": "^1.0.7",
     "@hpcc-js/wasm": "^2.13.0",
     "@microsoft/fetch-event-source": "^2.0.1",
     "gpt-3-encoder": "^1.1.4",

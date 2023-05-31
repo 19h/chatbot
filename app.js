@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const sharp = require('sharp');
+const tiktoken = require('@dqbd/tiktoken');
 
 (async () => {
     const TelegramBot = require('node-telegram-bot-api');
@@ -13,8 +14,95 @@ const sharp = require('sharp');
 
     const bot = new TelegramBot(token, { polling: true });
 
+    const chill_send_message = (() => {
+        const MAX_MESSAGES_PER_SECOND = 25;
+        const MAX_MESSAGES_PER_CHAT_PER_SECOND = 1;
+
+        const queue = [];
+
+        let sent_this_second = 0;
+        let process_queue_id = null;
+
+        const clear_intervals = () => {
+            clearInterval(process_queue_id);
+
+            process_queue_id = null;
+        };
+
+        const set_intervals = () => {
+            process_queue_id = setInterval(process_queue, 1200);
+        };
+
+        const send_message = (chat_id, text, options = {}) => {
+            return new Promise((resolve, reject) => {
+                queue.push({ chat_id, text, options, resolve, reject });
+
+                if (process_queue_id === null && queue.length === 1) {
+                    process_queue();
+                }
+
+                if (process_queue_id === null) {
+                    clear_intervals();
+                    set_intervals();
+                }
+
+                return;
+            });
+        };
+
+        const process_queue = () => {
+            if (queue.length === 0) {
+                clear_intervals();
+
+                return;
+            }
+
+            const epoch_chats = new Map();
+            const messages = [];
+
+            const epoch_queue = queue.slice(0);
+            
+            queue.splice(0);
+
+            for (let i = 0; i < epoch_queue.length; i++) {
+                const { chat_id, text, options, resolve, reject } = epoch_queue[i];
+
+                const chat_messages_in_epoch = epoch_chats.get(chat_id) || 0;
+
+                const chat_cap_exceeded = chat_messages_in_epoch >= MAX_MESSAGES_PER_CHAT_PER_SECOND;
+                const global_cap_exceeded = messages.length >= MAX_MESSAGES_PER_SECOND;
+
+                if (chat_cap_exceeded || global_cap_exceeded) {
+                    queue.push({ chat_id, text, options, resolve, reject });
+
+                    continue;
+                }
+
+                epoch_chats.set(chat_id, chat_messages_in_epoch + 1);
+
+                messages.push({ chat_id, text, options, resolve, reject });
+            }
+
+            if (queue.length === 0 && messages.length === 0) {
+                clear_intervals();
+
+                return;
+            }
+
+            for (let i = 0; i < messages.length; i++) {
+                const { chat_id, text, options, resolve, reject } = messages[i];
+
+                bot.sendMessage(chat_id, text, options)
+                    .then(resolve)
+                    .catch(reject);
+            }
+        };
+
+        return send_message;
+    })();
+
     const sendTempMessage = (chatId, text, ms, options = {}) =>
-        bot.sendMessage(chatId, text, options)
+        chill_send_message(chatId, text, options)
             .then(message => {
                 setTimeout(
                     () => bot.deleteMessage(chatId, message.message_id),
@@ -41,6 +129,20 @@ const sharp = require('sharp');
     };
 
     reload_profiles();
+
+    const tokenizer_gpt4 = tiktoken.encoding_for_model('gpt-4-0314');
+    
+    //const tokenizer_claude =
+    //    new tiktoken.Tiktoken(
+    //        fs.readFileSync('./claude-v1-tokenization.tiktoken', 'utf8'),
+    //        {
+    //            "<EOT>": 0,
+    //            "<META>": 1,
+    //            "<META_START>": 2,
+    //            "<META_END>": 3,
+    //            "<SOS>": 4,
+    //        }
+    //    )
 
     class ChatGPTAPI {
         constructor() {
@@ -148,6 +250,18 @@ const sharp = require('sharp');
             });
         }
 
+        async check_message_tokens(messages) {
+            const text = messages.map(message => message.content).join('');
+            const token_count = tokenizer_gpt4.encode(text).length;
+
+            const gpt4_token_count = 8000;
+
+            return {
+                token_count,
+                token_delta: gpt4_token_count - token_count,
+            };
+        }
+
         async completion(
             messages,
             temperature = 0.1,
@@ -236,6 +350,18 @@ const sharp = require('sharp');
             }
 
             return formattedMessages;
+        }
+
+        async check_message_tokens(messages) {
+            const text = messages.map(message => message.content).join('');
+            const token_count = tokenizer_gpt4.encode(text).length;
+
+            const gpt4_token_count = 100_000;
+
+            return {
+                token_count, // wrong but whatever
+                token_delta: gpt4_token_count - token_count,
+            };
         }
 
         async completion(
@@ -425,8 +551,8 @@ const sharp = require('sharp');
 
     class ChatSession {
         constructor(chat_id, user_id) {
-            this.chat_id = chat_id;
-            this.user_id = user_id;
+            this.chat_id = String(chat_id);
+            this.user_id = String(user_id);
 
             this.ensure_session_dir();
 
@@ -478,21 +604,36 @@ const sharp = require('sharp');
 
             try {
                 const data = JSON.parse(fs.readFileSync(session_path).toString());
-                const conversation = new UserConversation();
-
-                conversation.init_from_checkpoint(data.checkpoint);
-
-                return {
-                    conversation,
-                    is_working: data.is_working,
-                    profile: data.profile,
-                    last_message: data.last_message,
-                    custom_profile: data.custom_profile,
-                };
+                
+                return this.deserialize(data);
             } catch (err) {
                 console.log(err);
                 return null;
             }
+        }
+
+        deserialize(data) {
+            const conversation = new UserConversation();
+
+            conversation.init_from_checkpoint(data.checkpoint);
+
+            return {
+                conversation,
+                is_working: data.is_working,
+                profile: data.profile,
+                last_message: data.last_message,
+                custom_profile: data.custom_profile,
+            };
+        }
+
+        serialize() {
+            return {
+                is_working: this.ctx.is_working,
+                profile: this.ctx.profile,
+                last_message: this.ctx.last_message,
+                custom_profile: this.ctx.custom_profile,
+                checkpoint: this.ctx.conversation.dump_for_checkpoint(),
+            };
         }
 
         persist() {
@@ -504,13 +645,7 @@ const sharp = require('sharp');
                     `${this.chat_id}.json`,
                 );
 
-            const data = {
-                is_working: this.ctx.is_working,
-                profile: this.ctx.profile,
-                last_message: this.ctx.last_message,
-                custom_profile: this.ctx.custom_profile,
-                checkpoint: this.ctx.conversation.dump_for_checkpoint(),
-            };
+            const data = this.serialize();
 
             fs.mkdirSync(path.dirname(session_path), { recursive: true });
 
@@ -811,7 +946,6 @@ const sharp = require('sharp');
             stop = null,
             telegram_send_cb = null,
         ) {
-
             const is_private_message = this.msg.chat?.type === 'private';
 
             const text = raw_text.trim();
@@ -820,18 +954,26 @@ const sharp = require('sharp');
                 return;
             }
 
+            this.send_profile_reminder_if_needed();
+
             let is_typing = true;
 
             await bot.sendChatAction(this.msg.chat.id, 'typing');
 
+            let y;
             let x = setInterval(() => {
                 if (!is_typing) {
+                    clearTimeout(x);
                     clearInterval(x);
                     return;
                 }
 
                 bot.sendChatAction(this.msg.chat.id, 'typing');
             }, 1000);
+
+            y = setTimeout(() => {
+                clearInterval(x);
+            }, 30000);
 
             let attempt = 0;
 
@@ -865,6 +1007,8 @@ const sharp = require('sharp');
                     }
 
                     if (!response) {
+                        await sleep(5000 + Math.random() * 10000);
+
                         continue;
                     }
 
@@ -879,7 +1023,7 @@ const sharp = require('sharp');
                         const telegraph_url = telegraph_post?.url ?? null;
 
                         tgtext += `\n\n${telegraph_url}`;
-                    };
+                    }
 
                     console.log('[%s] [%s] response: %s', this.msg.chat.id, this.msg.from?.id, tgtext);
 
@@ -904,7 +1048,7 @@ const sharp = require('sharp');
                             chunk,
                             with_reply = false,
                         ) => {
-                            const fn = telegram_send_cb ?? ((...args) => bot.sendMessage(...args));
+                            const fn = telegram_send_cb ?? ((...args) => chill_send_message(...args));
 
                             return fn(
                                 this.msg.chat.id,
@@ -996,9 +1140,7 @@ const sharp = require('sharp');
                     attempt += 1;
                 }
 
-                await new Promise((resolve) => {
-                    setTimeout(resolve, 3000);
-                });
+                await sleep(3000);
             }
 
             is_typing = false;
@@ -1067,8 +1209,6 @@ const sharp = require('sharp');
         async process () {
             const is_private_message = this.msg.chat?.type === 'private';
             const is_reply = this.msg.reply_to_message?.text !== undefined;
-
-            this.send_profile_reminder_if_needed();
 
             if (!this.msg.text) {
                 return;
@@ -1143,12 +1283,12 @@ const sharp = require('sharp');
             }
 
             if (this.msg.text === '!debug') {
-                const dump = JSON.stringify(dump_session(this.msg.chat.id, this.msg.from?.id), null, 4);
+                const dump = JSON.stringify(this.chat_session.serialize(), null, 4);
 
                 const chunks = chunk_string(dump, 4000);
 
                 for (const chunk of chunks) {
-                    await bot.sendMessage(
+                    await chill_send_message(
                         this.msg.chat.id,
                         `<pre language="json">${chunk}</pre>`,
                         {
@@ -1204,7 +1344,7 @@ const sharp = require('sharp');
                         '!c <text> - respond to the given prompt (groups only, private messages are treated as prompts automatically)',
                     ].join('\n');
 
-                await bot.sendMessage(
+                await chill_send_message(
                     this.msg.chat.id,
                     reply,
                 );
@@ -1426,7 +1566,7 @@ const sharp = require('sharp');
                         verbatim_claude[2],
                     );
 
-                    await bot.sendMessage(
+                    await chill_send_message(
                         this.msg.chat.id,
                         response,
                         {
@@ -1500,7 +1640,7 @@ const sharp = require('sharp');
                     true,
                     0.7,
                     '----',
-                    (chat, msg, opts) => bot.sendMessage(chat, `1. ${msg}`, opts),
+                    (chat, msg, opts) => chill_send_message(chat, `1. ${msg}`, opts),
                 );
 
                 return;
@@ -1512,7 +1652,7 @@ const sharp = require('sharp');
                     true,
                     0.7,
                     '----',
-                    (chat, msg, opts) => bot.sendMessage(chat, `1. ${msg}`, opts),
+                    (chat, msg, opts) => chill_send_message(chat, `1. ${msg}`, opts),
                 );
 
                 return;
@@ -1703,7 +1843,7 @@ const sharp = require('sharp');
         }
 
         static async from_message(msg, ban_list) {
-            const ctx = new ChatSession(
+            const chat_session = new ChatSession(
                 msg.chat.id,
                 msg.from?.id,
             );
@@ -1728,9 +1868,4 @@ const sharp = require('sharp');
             console.log(err);
         }
     });
-
-    setTimeout(() => {
-        persist_sessions();
-        process.exit(0);
-    }, 7200 * 1000);
 })();
