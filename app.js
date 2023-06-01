@@ -583,6 +583,7 @@ const tiktoken = require('@dqbd/tiktoken');
                 is_working: false,
                 profile: null,
                 last_message: null,
+                mode: this.ctx.mode || null,
                 custom_profile: null,
             };
 
@@ -622,6 +623,7 @@ const tiktoken = require('@dqbd/tiktoken');
                 is_working: data.is_working,
                 profile: data.profile,
                 last_message: data.last_message,
+                mode: data.mode,
                 custom_profile: data.custom_profile,
             };
         }
@@ -632,6 +634,7 @@ const tiktoken = require('@dqbd/tiktoken');
                 profile: this.ctx.profile,
                 last_message: this.ctx.last_message,
                 custom_profile: this.ctx.custom_profile,
+                mode: this.ctx.mode,
                 checkpoint: this.ctx.conversation.dump_for_checkpoint(),
             };
         }
@@ -676,9 +679,9 @@ const tiktoken = require('@dqbd/tiktoken');
             }
 
             fs.renameSync('sessions.json', 'sessions.json.bak');
-        } catch (err) {
-            console.log(err);
-        }
+
+            console.log('Successfully migrated sessions');
+        } catch (err) {}
     };
 
     migrate_sessions();
@@ -842,7 +845,6 @@ const tiktoken = require('@dqbd/tiktoken');
     class ConversationFrame {
         constructor(chat_session, msg, ban_list) {
             this.chat_session = chat_session;
-            this.ctx = chat_session.ctx;
 
             this.msg = msg;
 
@@ -851,7 +853,7 @@ const tiktoken = require('@dqbd/tiktoken');
 
         async setup_telegraph () {
             try {
-                this.ctx.telegraph_config =
+                this.chat_session.ctx.telegraph_config =
                     await createTelegraphAccount(
                         buildTelegraphUsername(
                             this.msg.chat.id,
@@ -872,7 +874,7 @@ const tiktoken = require('@dqbd/tiktoken');
         }
 
         async create_telegraph_page(content) {
-            if (!this.ctx.telegraph_config) {
+            if (!this.chat_session.ctx.telegraph_config) {
                 if (null === await this.setup_telegraph()) {
                     return null;
                 }
@@ -881,9 +883,9 @@ const tiktoken = require('@dqbd/tiktoken');
             try {
                 const page =
                     await createTelegraphPage(
-                        this.ctx.telegraph_config.access_token,
+                        this.chat_session.ctx.telegraph_config.access_token,
                         'bootlegsiri-' + (new Date()).toISOString(),
-                        this.ctx.telegraph_config.author_name,
+                        this.chat_session.ctx.telegraph_config.author_name,
                         JSON.stringify(parse_tgp_content(content)),
                     );
 
@@ -904,39 +906,37 @@ const tiktoken = require('@dqbd/tiktoken');
         async init(profile) {
             this.chat_session.reset_session();
 
-            this.ctx.conversation.init_conversation(profile || 'g');
+            this.chat_session.ctx.conversation.init_conversation(
+                profile || this.get_chat_profile(),
+            );
 
-            this.ctx.profile = profile || 'g';
-            this.ctx.custom_profile = null;
+            this.chat_session.ctx.profile = profile || this.get_chat_profile();
+            this.chat_session.ctx.custom_profile = null;
 
-            if (!this.ctx.telegraph_config) {
+            if (!this.chat_session.ctx.telegraph_config) {
                 await this.setup_telegraph();
             }
-
-            this.chat_session.persist();
         }
 
         async init_custom(name, name_other, persona) {
             this.chat_session.reset_session();
 
-            this.ctx.conversation.init_conversation_custom({
+            this.chat_session.ctx.conversation.init_conversation_custom({
                 name,
                 name_other,
                 persona,
             });
 
-            this.ctx.profile = null;
-            this.ctx.custom_profile = {
+            this.chat_session.ctx.profile = null;
+            this.chat_session.ctx.custom_profile = {
                 name,
                 name_other,
                 persona,
             };
 
-            if (!this.ctx.telegraph_config) {
+            if (!this.chat_session.ctx.telegraph_config) {
                 await this.setup_telegraph();
             }
-
-            this.chat_session.persist();
         }
 
         async process_command (
@@ -953,8 +953,6 @@ const tiktoken = require('@dqbd/tiktoken');
             if (text.trim().length === 0) {
                 return;
             }
-
-            this.send_profile_reminder_if_needed();
 
             let is_typing = true;
 
@@ -990,9 +988,9 @@ const tiktoken = require('@dqbd/tiktoken');
                                     text,
                                     temperature,
                                     stop,
-                                    this.ctx.conversation.get_backend(),
+                                    this.chat_session.ctx.conversation.get_backend(),
                                 )
-                                : await this.ctx.conversation.send(text);
+                                : await this.chat_session.ctx.conversation.send(text);
                     } catch(err) {
                         await sendTempMessage(
                             this.msg.chat.id,
@@ -1088,7 +1086,7 @@ const tiktoken = require('@dqbd/tiktoken');
                     a: for (const chunk of chunks) {
                         b: for (let i = 0; i < 3; ++i) {
                             try {
-                                this.ctx.last_message =
+                                this.chat_session.ctx.last_message =
                                     await send_message(
                                         chunk,
                                         true,
@@ -1110,7 +1108,7 @@ const tiktoken = require('@dqbd/tiktoken');
 
                         for (let i = 0; i < 3; ++i) {
                             try {
-                                this.ctx.last_message =
+                                this.chat_session.ctx.last_message =
                                     await send_message(
                                         chunk,
                                         false,
@@ -1153,7 +1151,7 @@ const tiktoken = require('@dqbd/tiktoken');
             stop = null,
             telegram_send_cb = null,
         ) {
-            this.ctx.is_working = true;
+            this.chat_session.ctx.is_working = true;
 
             try {
                 await this.process_command(
@@ -1167,43 +1165,17 @@ const tiktoken = require('@dqbd/tiktoken');
                 console.log(err);
             }
 
-            this.ctx.is_working = false;
+            this.chat_session.ctx.is_working = false;
 
             this.chat_session.persist();
         }
 
-        async send_profile_reminder_if_needed () {
-            const last_message_date = this.ctx?.last_message?.date * 1000 ?? 0;
-
-            if (last_message_date === 0) {
-                return;
+        get_chat_profile() {
+            if (this.chat_session.ctx.mode === 'dev') {
+                return 'copilot';
             }
 
-            const now = Date.now();
-
-            const delta = now - last_message_date;
-
-            if (delta > 1000 * 60 * 60 * 2) { // 2 hours
-                const has_profile = this.ctx?.profile;
-                const has_custom_profile = this.ctx?.custom_profile;
-
-                if (!has_profile && !has_custom_profile) {
-                    return;
-                }
-
-                const username = this.msg?.from?.username;
-                const username_highlight = username ? `@${username} ` : '';
-
-                const is_private = this.msg.chat?.type === 'private';
-                const reply_prefix = is_private ? '' : username_highlight;
-
-                await sendTempMessage(
-                    this.msg.chat.id,
-                    `<b>${reply_prefix}Reminder: you were idle for more than 2 hours and have a ${ has_custom_profile ? 'custom ' : '' } profile set. You can reset it by using !cs or by loading a new profile via !ctp «profile».</b>`,
-                    5000,
-                    { parse_mode: 'HTML' },
-                );
-            }
+            return 'g';
         }
 
         async process () {
@@ -1257,13 +1229,11 @@ const tiktoken = require('@dqbd/tiktoken');
             if (this.msg.text === '!gpt4') {
                 this.chat_session.reset_session();
 
-                this.ctx.conversation.with_backend(null);
+                this.chat_session.ctx.conversation.with_backend(null);
 
-                if (!this.ctx.telegraph_config) {
+                if (!this.chat_session.ctx.telegraph_config) {
                     await this.setup_telegraph();
                 }
-
-                this.chat_session.persist();
 
                 return;
             }
@@ -1271,13 +1241,39 @@ const tiktoken = require('@dqbd/tiktoken');
             if (this.msg.text === '!claude') {
                 this.chat_session.reset_session();
 
-                this.ctx.conversation.with_backend('claude');
+                this.chat_session.ctx.conversation.with_backend('claude');
 
-                if (!this.ctx.telegraph_config) {
+                if (!this.chat_session.ctx.telegraph_config) {
                     await this.setup_telegraph();
                 }
 
-                persist_sessions();
+                return;
+            }
+
+            if (this.msg.text === '!dev') {
+                this.chat_session.reset_session();
+
+                this.chat_session.ctx.mode = 'dev';
+
+                sendTempMessage(
+                    this.msg.chat.id,
+                    'dev mode enabled.',
+                    2000,
+                );
+
+                return;
+            }
+
+            if (this.msg.text === '!r') {
+                this.chat_session.reset_session();
+
+                this.chat_session.ctx.mode = null;
+
+                sendTempMessage(
+                    this.msg.chat.id,
+                    'session reset.',
+                    2000,
+                );
 
                 return;
             }
@@ -1301,11 +1297,11 @@ const tiktoken = require('@dqbd/tiktoken');
             }
 
             if (this.msg.text === '!wo') {
-                this.ctx.is_working = false;
+                this.chat_session.ctx.is_working = false;
                 return;
             }
 
-            if (this.ctx.is_working) {
+            if (this.chat_session.ctx.is_working) {
                 return;
             }
 
@@ -1389,7 +1385,7 @@ const tiktoken = require('@dqbd/tiktoken');
 
             if (this.msg.text === '!cs') {
                 await this.init();
-                this.ctx.last_message = null;
+                this.chat_session.ctx.last_message = null;
                 return;
             }
 
@@ -1409,7 +1405,7 @@ const tiktoken = require('@dqbd/tiktoken');
 
                     await this.init(ctp_params?.[1]);
 
-                    this.ctx.last_message = null;
+                    this.chat_session.ctx.last_message = null;
 
                     if (is_private_message) {
                         await sendTempMessage(
@@ -1449,7 +1445,7 @@ const tiktoken = require('@dqbd/tiktoken');
                         ctpc_params?.[3],
                     );
 
-                    this.ctx.last_message = null;
+                    this.chat_session.ctx.last_message = null;
 
                     await sendTempMessage(
                         this.msg.chat.id,
@@ -1490,7 +1486,7 @@ const tiktoken = require('@dqbd/tiktoken');
                         `You are ${cp_params?.[1]}.`,
                     );
 
-                    this.ctx.last_message = null;
+                    this.chat_session.ctx.last_message = null;
 
                     await sendTempMessage(
                         this.msg.chat.id,
@@ -1523,9 +1519,11 @@ const tiktoken = require('@dqbd/tiktoken');
 
             // if message starts with !cr, reinit the session using the profile "g"
             if (this.msg.text?.startsWith('!cr')) {
-                await this.init('g');
+                await this.init(
+                    this.get_chat_profile(),
+                );
 
-                this.ctx.last_message = null;
+                this.chat_session.ctx.last_message = null;
             }
 
             const verbatim_response = /^!vr\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(this.msg.text);
@@ -1557,7 +1555,7 @@ const tiktoken = require('@dqbd/tiktoken');
             const verbatim_claude = /^!vc\s(\d+\.\d\d?)?\s?([\s\S]+)$/ig.exec(this.msg.text);
 
             if (verbatim_claude && verbatim_claude[2]) {
-                this.ctx.is_working = true;
+                this.chat_session.ctx.is_working = true;
 
                 await bot.sendChatAction(this.msg.chat.id, 'typing');
 
@@ -1590,7 +1588,7 @@ const tiktoken = require('@dqbd/tiktoken');
                     } catch {}
                 }
 
-                this.ctx.is_working = false;
+                this.chat_session.ctx.is_working = false;
 
                 return;
             }
@@ -1828,12 +1826,14 @@ const tiktoken = require('@dqbd/tiktoken');
                 if (
                     cr?.[1] === '!cr'
                     || (
-                        this.ctx.profile === null
-                        && !this.ctx.custom_profile
-                        && this.ctx.last_message === null
+                        this.chat_session.ctx.profile === null
+                        && !this.chat_session.ctx.custom_profile
+                        && this.chat_session.ctx.last_message === null
                     )
                 ) {
-                    await this.init('g');
+                    await this.init(
+                        this.get_chat_profile(),
+                    );
                 }
 
                 await this.do_msg_things(cr[2]);
@@ -1848,14 +1848,20 @@ const tiktoken = require('@dqbd/tiktoken');
                 msg.from?.id,
             );
 
-            const session =
-                new ConversationFrame(
-                    chat_session,
-                    msg,
-                    ban_list,
-                );
+            try {
+                const session =
+                    new ConversationFrame(
+                        chat_session,
+                        msg,
+                        ban_list,
+                    );
 
-            await session.process();
+                await session.process();
+            } catch(err) {
+                console.log(err);
+            }
+
+            chat_session.persist();
         }
     }
 
@@ -1868,4 +1874,6 @@ const tiktoken = require('@dqbd/tiktoken');
             console.log(err);
         }
     });
+
+    bot.on('')
 })();
